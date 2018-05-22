@@ -6,7 +6,7 @@ using GMap.NET;
 using GMap.NET.MapProviders;
 using GMap.NET.WindowsForms;
 using GMap.NET.WindowsForms.Markers;
-using Polylines;
+using Polyline = Polylines.Polyline;
 
 namespace LINQPad.MapUtils
 {
