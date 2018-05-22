@@ -13,71 +13,62 @@ namespace LINQPad.MapUtils
     public static class ObjectExtensions
     {
         private static readonly object PanelSync = new object();
-        public static IEnumerable<T> DumpMarkers<T>(this IEnumerable<T> items, Func<T, (double latitude, double longitude)> coordinateSelector, Func<T, string> tooltipSelector = null, string panel = "Map", string overlay = "Markers")
+        public static IEnumerable<T> DumpMarkers<T>(this IEnumerable<T> items, Func<T, (double latitude, double longitude)> coordinateSelector, Func<T, string> tooltipSelector = null, string panel = "Map", string overlay = "Markers", Func<T, GMarkerGoogleType> markerTypeSelector = null, Action<T, GoogleMarkerWithData> config = null)
         {
             if (panel == null) throw new ArgumentNullException(nameof(panel));
 
-            var mapControl = GetMapControl<T>(panel);
+            var mapControl = GetMapControl(null, panel);
 
-            var mapOverlay = GetMapOverlay<T>(overlay, mapControl);
+            var mapOverlay = mapControl.GetMapOverlay(overlay);
 
-            var markers = items.Select(i => new GoogleMarkerWithData(coordinateSelector(i), GMarkerGoogleType.red, i)
+            var list = new List<T>();
+            foreach (var item in items)
             {
-                ToolTipText = tooltipSelector?.Invoke(i) ?? i.ToString()
-            });
-            foreach (var marker in markers)
-            {
+                var marker = new GoogleMarkerWithData(coordinateSelector(item), markerTypeSelector?.Invoke(item) ?? GMarkerGoogleType.red, item)
+                {
+                    ToolTipText = tooltipSelector?.Invoke(item) ?? item.ToString()
+                };
+
+                config?.Invoke(item, marker);
                 mapOverlay.Markers.Add(marker);
+                list.Add(item);
             }
-
-            mapControl.ZoomAndCenterMarkers(null);
-            mapControl.OnMarkerClick += (marker, sender) =>
-            {
-                switch (marker)
-                {
-                    case GoogleMarkerWithData markerWithData:
-                        markerWithData.Item.Dump();
-                        break;
-                }
-            };
-
-            return items;
+            return list;
         }
 
-        public static IEnumerable<T> DumpRoute<T>(this IEnumerable<T> items, Func<T, (double latitude, double longitude)> coordinateSelector, string routeName = "Route", string panel = "Map", string overlay = "Routes")
+        public static IEnumerable<T> DumpRoute<T>(this IEnumerable<T> items, Func<T, (double latitude, double longitude)> coordinateSelector, string routeName = "Route", string panel = "Map", string overlay = "Routes", Action<GMapRoute> config = null)
         {
             if (panel == null) throw new ArgumentNullException(nameof(panel));
 
-            var mapControl = GetMapControl<T>(panel);
+            var mapControl = GetMapControl(null, panel);
 
-            var mapOverlay = GetMapOverlay<T>(overlay, mapControl);
-
-            var route = new GMapRoute(items
-                .Select(i =>
-                {
-                    var coords = coordinateSelector(i);
-                    return new PointLatLng(coords.latitude, coords.longitude);
-                }),
-                routeName);
-
+            var mapOverlay = mapControl.GetMapOverlay(overlay);
+            var route = new GMapRoute(routeName);
+            config?.Invoke(route);
             mapOverlay.Routes.Add(route);
-            mapControl.ZoomAndCenterRoute(route);
-
-            return items;
-        }
-
-        public static IEnumerable<T> DumpRoute<T>(this IEnumerable<T> items, Func<T, string> encodedPolylineSelector, Func<T, string> routeNameSelector = null, string panel = "Map", string overlay = "Routes")
-        {
-            foreach (var i in items)
+            var list = new List<T>();
+            foreach (var item in items)
             {
-                Polyline.DecodePolyline(encodedPolylineSelector(i))
-                    .DumpRoute(x => (x.Latitude, x.Longitude), routeNameSelector?.Invoke(i), panel, overlay);
+                var (latitude, longitude) = coordinateSelector(item);
+                route.Points.Add(new PointLatLng(latitude, longitude));
+                list.Add(item);
             }
-
-            return items;
+            return list;
         }
 
-        private static GMapOverlay GetMapOverlay<T>(string overlay, GMapControl mapControl)
+        public static IEnumerable<T> DumpRoute<T>(this IEnumerable<T> items, Func<T, string> encodedPolylineSelector, Func<T, string> routeNameSelector = null, string panel = "Map", string overlay = "Routes", Action<T, GMapRoute> config = null)
+        {
+            var list = new List<T>();
+            foreach (var item in items)
+            {
+                Polyline.DecodePolyline(encodedPolylineSelector(item))
+                    .DumpRoute(x => (x.Latitude, x.Longitude), routeNameSelector?.Invoke(item), panel, overlay, r => config?.Invoke(item, r));
+                list.Add(item);
+            }
+            return list;
+        }
+
+        public static GMapOverlay GetMapOverlay(this GMapControl mapControl, string overlay)
         {
             GMapOverlay mapOverlay;
             lock (mapControl)
@@ -92,7 +83,7 @@ namespace LINQPad.MapUtils
             return mapOverlay;
         }
 
-        private static GMapControl GetMapControl<T>(string panel)
+        public static GMapControl GetMapControl(this DataContextBase _, string panel = "Map")
         {
             GMapControl mapControl;
             lock (PanelSync)
@@ -109,11 +100,37 @@ namespace LINQPad.MapUtils
                         DragButton = MouseButtons.Left,
                         IgnoreMarkerOnMouseWheel = true,
                     };
+                    var timer = new System.Timers.Timer();
+                    timer.Elapsed += (sender, e) =>
+                    {
+                        timer.Stop();
+                        var rect = mapControl.Overlays
+                            .SelectMany(o => new[]
+                            {
+                            mapControl.GetRectOfAllMarkers(o.Id),
+                            mapControl.GetRectOfAllRoutes(o.Id),
+                            })
+                            .Where(r => r.HasValue)
+                            .Select(r => r.Value)
+                            .Aggregate((c, a) => RectLatLng.Union(a, c));
+                        mapControl.SetZoomToFitRect(rect);
+                        timer.Dispose();
+                    };
+                    mapControl.Load += (sender, e) => timer.Start();
+                    mapControl.OnMarkerClick += (marker, sender) =>
+                    {
+                        switch (marker)
+                        {
+                            case GoogleMarkerWithData markerWithData:
+                                markerWithData.Item.Dump();
+                                break;
+                        }
+                    };
                     PanelManager.DisplayControl(mapControl, panel);
                 }
                 else
                 {
-                    mapControl = (GMapControl) outputPanel.GetControl();
+                    mapControl = (GMapControl)outputPanel.GetControl();
                 }
             }
             return mapControl;
